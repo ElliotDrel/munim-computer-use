@@ -33,7 +33,7 @@
 &ensp;•&ensp;
   <a aria-label="report issues" href="https://github.com/munimtechnologies/munim-computer-use/issues">Report Issues</a>
 &ensp;•&ensp;
-  <a aria-label="website" href="https://munimtech.com/computer-use">munimtech.com/computer-use</a>
+  <a aria-label="website" href="https://munimtech.com/munim-computer-use">munimtech.com/munim-computer-use</a>
 </p>
 
 <h6 align="center">Follow Munim Technologies</h6>
@@ -55,7 +55,7 @@
 
 **Works with Claude Code, Codex, Cursor and [MT Code](https://munimtech.com/mtcode)**, or any other MCP client, with any model — no vision model is required for interaction.
 
-**Built by [Munim Technologies](https://munimtech.com/computer-use)** as the Computer Use engine of MT Code, and published here on its own.
+**Built by [Munim Technologies](https://munimtech.com/munim-computer-use)** as the Computer Use engine of MT Code, and published here on its own.
 
 ## Table of contents
 

@@ -4216,7 +4216,7 @@ while let line = readLine(strippingNewline: true) {
                 "name": "mt-desktop",
                 "title": "Munim Computer Use",
                 "version": serverVersion,
-                "websiteUrl": "https://munimtech.com/computer-use",
+                "websiteUrl": "https://munimtech.com/munim-computer-use",
             ],
             "instructions": serverInstructions,
         ])

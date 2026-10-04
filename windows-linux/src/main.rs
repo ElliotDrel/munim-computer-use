@@ -42,7 +42,7 @@ const SUPPORTED_PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "202
 const FALLBACK_PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "mt-desktop";
 const SERVER_TITLE: &str = "Munim Computer Use";
-const SERVER_WEBSITE: &str = "https://munimtech.com/computer-use";
+const SERVER_WEBSITE: &str = "https://munimtech.com/munim-computer-use";
 const SERVER_VERSION: &str = "0.6.0";
 
 /// Keeps the agent pointer up for the duration of a `tools/call`, then

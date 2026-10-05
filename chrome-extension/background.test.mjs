@@ -45,6 +45,9 @@ let windowRemovedListener = null;
 let pageEval = () => ({ result: { value: {} } });
 let connects = 0;
 let sent = [];
+/** Tabs the extension attached the debugger to, in order. */
+const attaches = [];
+let debuggerDetachListener = null;
 
 // Most tests drive the MT Code host's port; the multi-host tests pick one.
 const nativeListener = (msg) => portFor(MT_HOST).onMessageListener(msg);
@@ -126,8 +129,11 @@ const chrome = {
     update: async (id, props) => Object.assign(groups.get(id), props),
   },
   debugger: {
-    attach: async () => {},
+    attach: async ({ tabId }) => {
+      attaches.push(tabId);
+    },
     detach: async () => {},
+    onDetach: { addListener: (fn) => { debuggerDetachListener = fn; } },
     sendCommand: async (target, method, params) => pageEval(method, params ?? {}, target.tabId),
   },
   windows: {
@@ -159,7 +165,8 @@ async function fetch(url) {
 }
 
 // URL is not an enumerable global, so the spread below would leave it out.
-vm.runInContext(source, vm.createContext({ ...globalThis, URL, chrome, console, fetch }), {
+const extensionContext = vm.createContext({ ...globalThis, URL, chrome, console, fetch });
+vm.runInContext(source, extensionContext, {
   filename: "background.js",
 });
 
@@ -561,6 +568,111 @@ test("return_state attaches a fresh snapshot to an action", async () => {
   const withState = await callAndWait("click", { tabId: pageTab, index: 3, returnState: true });
   assert.equal(withState.snapshot.title, "After");
   pageEval = () => ({ result: { value: {} } });
+});
+
+test("a click index that is not a plain number never reaches the page as script", async () => {
+  const evaluated = [];
+  pageEval = (method, params) => {
+    evaluated.push(params.expression ?? "");
+    return { result: { value: { ok: true, x: 1, y: 1 } } };
+  };
+  const payload = `0"]'); globalThis.leaked = 1; ('`;
+  for (const index of [payload, 1.5, -1, { toString: () => "0" }]) {
+    const error = await refuses("click", { tabId: pageTab, index });
+    assert.match(error, /index must be an element index/);
+  }
+  assert.ok(!evaluated.some((expression) => expression.includes("leaked")), "the payload was evaluated");
+  pageEval = () => ({ result: { value: {} } });
+});
+
+test("return_state does not read a blocked site the action landed on", async () => {
+  const sites = [{ pattern: "bank.example", rule: "block" }];
+  const tab = tabs.get(pageTab);
+  const before = tab.url;
+  let snapshots = 0;
+  pageEval = (method, params) => {
+    const expression = params.expression ?? "";
+    if (expression.includes("data-cu-idx=\"2\"")) {
+      // The click follows a link into a blocked site.
+      tab.url = "https://www.bank.example/accounts";
+      return { result: { value: { ok: true, tag: "a", x: 5, y: 5 } } };
+    }
+    if (expression.includes("querySelectorAll(sel)")) {
+      snapshots += 1;
+      return { result: { value: { title: "Accounts", url: tab.url, elements: [] } } };
+    }
+    return { result: { value: {} } };
+  };
+  // return_state waits for the page to settle, so wait for the reply in time.
+  const error = await callAndWait("click", { tabId: pageTab, index: 2, returnState: true, sites }).then(
+    () => "click was supposed to fail",
+    (failure) => failure.message,
+  );
+  assert.match(error, /blocked by the user's Computer Use policy/);
+  assert.equal(snapshots, 0, "the blocked page was read");
+  tab.url = before;
+  pageEval = () => ({ result: { value: {} } });
+});
+
+test("a trailing dot does not take a host out from under its rule", async () => {
+  const error = await refuses("open_tab", {
+    url: "https://www.bank.example./login",
+    sites: [{ pattern: "bank.example", rule: "block" }],
+  });
+  assert.match(error, /blocked by the user's Computer Use policy/);
+  const rule = await refuses("open_tab", {
+    url: "https://bank.example/",
+    sites: [{ pattern: "bank.example.", rule: "block" }],
+  });
+  assert.match(rule, /blocked by the user's Computer Use policy/);
+});
+
+test("a debugger session Chrome ended is attached again on the next command", async () => {
+  pageEval = () => ({ result: { value: { title: "T", url: "https://shop.example/", elements: [] } } });
+  await call("snapshot", { tabId: pageTab });
+  const before = attaches.filter((id) => id === pageTab).length;
+  await call("snapshot", { tabId: pageTab });
+  assert.equal(attaches.filter((id) => id === pageTab).length, before, "an attached tab is reused");
+  // The user pressed Cancel on Chrome's "is debugging this browser" bar.
+  debuggerDetachListener({ tabId: pageTab }, "canceled_by_user");
+  await call("snapshot", { tabId: pageTab });
+  assert.equal(attaches.filter((id) => id === pageTab).length, before + 1, "re-attached after Chrome detached");
+  pageEval = () => ({ result: { value: {} } });
+});
+
+test("a snapshot clears indices an earlier snapshot left on now-hidden elements", () => {
+  const element = (tag, { hidden = false, idx } = {}) => {
+    const attributes = new Map(idx === undefined ? [] : [["data-cu-idx", idx]]);
+    return {
+      tagName: tag.toUpperCase(),
+      innerText: tag,
+      hidden,
+      getAttribute: (name) => attributes.get(name) ?? null,
+      setAttribute: (name, value) => attributes.set(name, String(value)),
+      removeAttribute: (name) => attributes.delete(name),
+      hasAttribute: (name) => attributes.has(name),
+      getBoundingClientRect: () => ({ left: 0, top: 0, right: 10, bottom: 10, width: hidden ? 0 : 10, height: hidden ? 0 : 10 }),
+    };
+  };
+  // Step one's button, now hidden, still carries index 0 from the last snapshot.
+  const stale = element("button", { hidden: true, idx: "0" });
+  const next = element("button");
+  const elements = [stale, next];
+  const document = {
+    title: "Step 2",
+    querySelectorAll: (selector) =>
+      selector === "[data-cu-idx]" ? elements.filter((el) => el.hasAttribute("data-cu-idx")) : elements,
+  };
+  const page = vm.createContext({
+    document,
+    location: { href: "https://shop.example/step2" },
+    innerHeight: 800,
+    getComputedStyle: () => ({ visibility: "visible", display: "block" }),
+  });
+  const result = vm.runInContext(vm.runInContext("SNAPSHOT_JS", extensionContext), page);
+  assert.equal(result.elements.length, 1);
+  assert.equal(next.getAttribute("data-cu-idx"), "0");
+  assert.equal(stale.getAttribute("data-cu-idx"), null, "the hidden element still answers to index 0");
 });
 
 test("a blocked site is refused before the tab is opened", async () => {

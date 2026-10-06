@@ -555,7 +555,9 @@ async function send(tabId, method, params = {}) {
 
 /// A compact outline of the interactive elements on the page, with ids the
 /// agent can click. Mirrors the accessibility-tree tools on the desktop side.
-const SNAPSHOT_JS = `(() => {
+const SNAPSHOT_JS = `((options = {}) => {
+  const offset = options.offset ?? 0;
+  const limit = options.limit ?? 250;
   const out = [];
   const sel = 'a,button,input,textarea,select,cfc-select,mat-option,[role=button],[role=link],[role=textbox],[role=combobox],[role=listbox],[role=option],[role=menu],[role=menuitem],[aria-haspopup],[contenteditable=true],summary';
   let i = 0;
@@ -563,35 +565,88 @@ const SNAPSHOT_JS = `(() => {
   // would otherwise keep its old number, and querySelector, which returns the
   // first match, could send a click or a credential fill to it instead.
   for (const old of document.querySelectorAll('[data-cu-idx]')) old.removeAttribute('data-cu-idx');
-  for (const el of document.querySelectorAll(sel)) {
+  // Accessibility-hidden/inert ancestors are not actionable. Do not use viewport
+  // intersection here: indexed click scrolls reachable offscreen controls into view.
+  const visible = (el) => {
     const r = el.getBoundingClientRect();
-    if (r.width < 2 || r.height < 2) continue;
+    if (r.width < 2 || r.height < 2) return false;
+    let escapedInert = false;
+    for (let node = el; node; node = node.parentElement) {
+      if (node.hidden || node.getAttribute('aria-hidden')?.toLowerCase() === 'true') return false;
+      if (node.inert && !escapedInert) return false;
+      // showModal() escapes ancestor inertness, but an explicitly inert dialog
+      // or subtree within it remains inert.
+      if (node.matches('dialog:modal')) escapedInert = true;
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.contentVisibility === 'hidden' || Number(style.opacity) === 0) return false;
+    }
     const style = getComputedStyle(el);
-    if (style.visibility === 'hidden' || style.display === 'none') continue;
+    return style.visibility !== 'hidden' && style.visibility !== 'collapse';
+  };
+  // Native modal dialogs live in Chrome's top layer, above ordinary z-indexes.
+  // For custom dialogs, use paint order at their visible centre, not DOM order
+  // or raw z-index (which is only meaningful inside a stacking context).
+  // Modeless native dialogs and explicit aria-modal=false keep page controls.
+  const dialogs = Array.from(document.querySelectorAll('dialog:modal,[role=dialog]:not([aria-modal=false i]),[role=alertdialog]:not([aria-modal=false i]),[aria-modal=true i]')).filter(visible);
+  const native = dialogs.filter((dialog) => dialog.matches(':modal'));
+  // Keep nested custom dialogs inside the native top layer eligible too.
+  const candidates = dialogs.filter((dialog) => !native.length || native.some((layer) => layer.contains(dialog))).reverse();
+  let modal = null;
+  for (const candidate of candidates) {
+    const r = candidate.getBoundingClientRect();
+    const left = Math.max(0, r.left), right = Math.min(innerWidth, r.right);
+    const top = Math.max(0, r.top), bottom = Math.min(innerHeight, r.bottom);
+    if (left >= right || top >= bottom) continue;
+    const painted = document.elementsFromPoint((left + right) / 2, (top + bottom) / 2);
+    // The first dialog in the hit-test stack wins, including nested dialogs.
+    for (const hit of painted) {
+      const owner = candidates.find((dialog) => dialog.contains(hit));
+      if (owner) { modal = owner; break; }
+    }
+    if (modal) break;
+  }
+  // A background tab can lack a hit-test stack. Keep its visible dialog usable
+  // rather than falling back to the background document and losing it again.
+  if (!modal) modal = candidates.find((dialog) => {
+    const r = dialog.getBoundingClientRect();
+    return r.right > 0 && r.bottom > 0 && r.left < innerWidth && r.top < innerHeight;
+  }) || null;
+  const scope = modal || document;
+  for (const el of scope.querySelectorAll(sel)) {
+    if (!visible(el)) continue;
+    const index = i++;
+    // Tag the full selected scope so indices stay global and earlier pages remain
+    // actionable when paging an unchanged UI. Only label/serialize this page.
+    el.setAttribute('data-cu-idx', String(index));
+    if (index < offset || index >= offset + limit) continue;
+    const r = el.getBoundingClientRect();
     // A password field's value is the secret itself: never let it reach the
     // model as a label (browser_request_credentials fills these instead).
     const secret = el.tagName === 'INPUT' && el.type === 'password';
     const label = (el.getAttribute('aria-label') || el.innerText || (secret ? '' : el.value) ||
                    el.getAttribute('title') || el.getAttribute('placeholder') || '')
                   .replace(/\\s+/g, ' ').trim().slice(0, 90);
-    el.setAttribute('data-cu-idx', String(i));
     const kind = el.tagName === 'INPUT' && el.type && el.type !== 'text' ? '[' + el.type + ']' : '';
     out.push({
-      i: i++,
+      i: index,
       tag: el.tagName.toLowerCase() + kind,
       label,
       x: Math.round(r.left + r.width / 2),
       y: Math.round(r.top + r.height / 2),
-      inView: r.top >= 0 && r.bottom <= innerHeight,
+      inView: r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth,
     });
-    if (i >= 250) break;
   }
-  return { title: document.title, url: location.href, elements: out };
+  const end = Math.min(i, offset + out.length);
+  return { title: document.title, url: location.href, elements: out,
+    scope: modal ? 'modal' : 'page', total: i, offset, limit,
+    truncated: end < i, nextOffset: end < i ? end : null };
 })()`;
 
-async function snapshot(tabId) {
+async function snapshot(tabId, { offset = 0, limit = 250 } = {}) {
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > 2147483647) throw new Error("offset must be an integer from 0 to 2147483647");
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 250) throw new Error("limit must be an integer from 1 to 250");
   const res = await send(tabId, "Runtime.evaluate", {
-    expression: SNAPSHOT_JS,
+    expression: SNAPSHOT_JS.slice(0, -2) + `(${JSON.stringify({ offset, limit })})`,
     returnByValue: true,
   });
   if (res?.exceptionDetails) throw new Error(res.exceptionDetails.text || "evaluate failed");
@@ -1548,7 +1603,7 @@ const handlers = {
     const clientId = requireClientId(p);
     assertOwned(clientId, p.tabId);
     await checkTab(clientId, p.tabId, p.sites, "read");
-    return snapshot(p.tabId);
+    return snapshot(p.tabId, { offset: p.offset, limit: p.limit });
   },
   read: async (p) => {
     const clientId = requireClientId(p);

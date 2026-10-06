@@ -474,6 +474,43 @@ check("an invalid policy file blocks instead of being ignored", async () => {
   fs.rmSync(policyPath);
 });
 
+check("snapshot scopes appended modal controls and indexed actions reach them", async () => {
+  await ok("browser_navigate", { tab_id: tab, url: `${base}/next`, return_state: true });
+  const background = Array.from({ length: 260 }, (_, i) => `<button>Background ${i}</button>`).join("");
+  const html = `<main aria-hidden="true">${background}</main><div role="dialog" aria-modal="true" style="position:fixed;inset:0;background:white"><input aria-label="Domain"><button id="modal-next">Next</button><button>Verify</button></div>`;
+  await evaluateIn((url) => url === `${base}/next`, `document.body.innerHTML = ${JSON.stringify(html)}; document.getElementById('modal-next').onclick = () => document.title = 'Modal target clicked'; true`);
+  const state = await ok("browser_snapshot", { tab_id: tab });
+  assert.match(state, /scope: modal; offset=0, limit=250, total=3/);
+  assert.match(state, /\[0\] input "Domain"/);
+  assert.match(state, /\[1\] button "Next"/);
+  assert.match(state, /\[2\] button "Verify"/);
+  assert.doesNotMatch(state, /Background/);
+  const after = await ok("browser_click", { tab_id: tab, index: 1, return_state: true });
+  assert.match(after, /Modal target clicked/);
+  assert.match(after, /scope: modal/);
+});
+
+check("snapshot pagination reaches all controls with stable global indices", async () => {
+  const html = Array.from({ length: 270 }, (_, i) => `<button>Control ${i}</button>`).join("");
+  await evaluateIn((url) => url === `${base}/next`, `document.body.innerHTML = ${JSON.stringify(html)}; document.querySelectorAll('button')[250].onclick = () => document.title = 'Page two clicked'; true`);
+  const first = await ok("browser_snapshot", { tab_id: tab });
+  assert.match(first, /scope: page; offset=0, limit=250, total=270/);
+  assert.match(first, /truncated — continue with browser_snapshot offset=250, limit=250/);
+  assert.doesNotMatch(first, /\[250\] button/);
+  const second = await ok("browser_snapshot", { tab_id: tab, offset: 250, limit: 20 });
+  assert.match(second, /scope: page; offset=250, limit=20, total=270/);
+  assert.match(second, /\[250\] button "Control 250"/);
+  assert.match(second, /\[269\] button "Control 269"/);
+  assert.doesNotMatch(second, /truncated/);
+  const after = await ok("browser_click", { tab_id: tab, index: 250, return_state: true });
+  assert.match(after, /Page two clicked/);
+  for (const options of [{ offset: -1 }, { limit: 251 }]) {
+    const result = await tool("browser_snapshot", { tab_id: tab, ...options });
+    assert.equal(result.isError, true);
+    assert.match(result.text, /offset must|limit must/);
+  }
+});
+
 let failed = 0;
 for (const [name, body] of checks) {
   try {

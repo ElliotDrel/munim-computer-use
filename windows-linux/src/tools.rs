@@ -788,7 +788,7 @@ fn all_tool_defs() -> Value {
         },
         {
             "name": "browser_snapshot",
-            "description": "List the interactive elements (links, buttons, inputs) on the page in one of the agent's tabs, with the index each one has for browser_click, plus the page title and URL. Inputs show their type, such as input[password]. Works on a background tab, so the user can be looking at something else. Use it before every browser_click, because indices change when the page changes; use browser_read for the page's text. Read-only.",
+            "description": "List the interactive elements (links, buttons, inputs) on the page in one of the agent's tabs, with the index each one has for browser_click, plus the page title and URL. Inputs show their type, such as input[password]. Works on a background tab, so the user can be looking at something else. Use it before every browser_click, because indices change when the page changes; use browser_read for the page's text. Read-only. Automatically scopes to the topmost visible dialog when one is open, excluding hidden/inert controls but retaining reachable offscreen controls. Results report scope, total and truncation. Continue with offset and limit on the same tab/session; indices stay global across pages of an unchanged UI. Snapshot again after UI changes.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -801,6 +801,18 @@ fn all_tool_defs() -> Value {
                     "tab_id": {
                         "type": "integer",
                         "description": "tab_id of one of the agent's tabs, from browser_open_tab or browser_list_tabs"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 2147483647,
+                        "description": "Control offset for pagination (default 0). Use the continuation offset from the previous result on an unchanged UI."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 250,
+                        "description": "Maximum controls returned per page (default 250, maximum 250)."
                     }
                 },
                 "required": ["tab_id"]

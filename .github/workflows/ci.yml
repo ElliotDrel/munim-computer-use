@@ -48,6 +48,7 @@ jobs:
         run: |
           cargo build --release --locked --manifest-path windows-linux/Cargo.toml
           chrome=$(npx -y @puppeteer/browsers install chrome@stable --path "$RUNNER_TEMP/cft" | tail -1 | sed 's/^[^ ]* //')
+          node scripts/snapshot-dom.test.mjs --chrome "$chrome"
           node scripts/e2e-browser.mjs --server "$PWD/windows-linux/target/release/munim-computer-use" --chrome "$chrome"
 
   swift:

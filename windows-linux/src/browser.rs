@@ -657,7 +657,7 @@ fn normalise(_command: &str, args: &Value) -> Value {
     if let Some(session) = args.get("session_id").filter(|v| !v.is_null()) {
         map.insert("sessionId".into(), session.clone());
     }
-    for key in ["url", "text", "key", "index", "x", "y", "all", "query", "offset", "fields", "reason"] {
+    for key in ["url", "text", "key", "index", "x", "y", "all", "query", "offset", "limit", "fields", "reason"] {
         if let Some(value) = args.get(key) {
             map.insert(key.into(), value.clone());
         }
@@ -924,6 +924,17 @@ fn describe_snapshot(result: &Value) -> String {
         result.get("title").and_then(Value::as_str).unwrap_or("?"),
         result.get("url").and_then(Value::as_str).unwrap_or("")
     )];
+    if let Some(total) = result.get("total").and_then(Value::as_u64) {
+        let offset = result.get("offset").and_then(Value::as_u64).unwrap_or(0);
+        let limit = result.get("limit").and_then(Value::as_u64).unwrap_or(250);
+        let scope = result.get("scope").and_then(Value::as_str).unwrap_or("page");
+        lines.push(format!("scope: {scope}; offset={offset}, limit={limit}, total={total}"));
+        if result.get("truncated").and_then(Value::as_bool) == Some(true) {
+            if let Some(next) = result.get("nextOffset").and_then(Value::as_u64) {
+                lines.push(format!("truncated — continue with browser_snapshot offset={next}, limit={limit} (same tab_id/session_id; unchanged UI keeps indices)"));
+            }
+        }
+    }
     for element in result
         .get("elements")
         .and_then(Value::as_array)
@@ -1204,6 +1215,24 @@ mod tests {
         // Releasing only must not claim a group was removed.
         let rendered = describe("close_all_tabs", &json!({ "closed": 0, "released": 1 }), &json!({}));
         assert!(!rendered.contains("removed the tab group"), "{rendered}");
+    }
+
+    #[test]
+    fn snapshot_pagination_is_forwarded_and_described() {
+        let params = normalise("snapshot", &json!({"tab_id": 7, "offset": 250, "limit": 20}));
+        assert_eq!(params["offset"], 250);
+        assert_eq!(params["limit"], 20);
+        let result = json!({
+            "title": "Many controls", "url": "https://example.com/", "scope": "modal",
+            "offset": 250, "limit": 20, "total": 300, "truncated": true, "nextOffset": 270,
+            "elements": [{"i": 250, "tag": "button", "label": "Next", "inView": true}]
+        });
+        let text = describe_snapshot(&result);
+        assert!(text.contains("scope: modal; offset=250, limit=20, total=300"));
+        assert!(text.contains("truncated — continue with browser_snapshot offset=270, limit=20"));
+        assert!(text.contains("[250] button \"Next\""));
+        let last = describe_snapshot(&json!({"total": 300, "offset": 300, "truncated": false}));
+        assert!(!last.contains("continue with"));
     }
 
     #[test]

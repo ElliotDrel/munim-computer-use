@@ -2620,6 +2620,15 @@ func bridgeText(_ result: BridgeOutcome, _ describe: ([String: Any]) -> String) 
 func describeSnapshot(_ payload: [String: Any]) -> String {
     let elements = payload["elements"] as? [[String: Any]] ?? []
     var lines = ["\(payload["title"] as? String ?? "?")  [\(payload["url"] as? String ?? "")]"]
+    if let total = payload["total"] as? Int {
+        let offset = payload["offset"] as? Int ?? 0
+        let limit = payload["limit"] as? Int ?? 250
+        let scope = payload["scope"] as? String ?? "page"
+        lines.append("scope: \(scope); offset=\(offset), limit=\(limit), total=\(total)")
+        if payload["truncated"] as? Bool == true, let next = payload["nextOffset"] as? Int {
+            lines.append("truncated — continue with browser_snapshot offset=\(next), limit=\(limit) (same tab_id/session_id; unchanged UI keeps indices)")
+        }
+    }
     for element in elements {
         let index = element["i"] as? Int ?? -1
         let tag = element["tag"] as? String ?? "?"
@@ -2632,7 +2641,13 @@ func describeSnapshot(_ payload: [String: Any]) -> String {
 
 func toolBrowserSnapshot(_ args: [String: Any]) -> String {
     guard let tabId = args["tab_id"] as? Int else { return "error: missing required argument 'tab_id'" }
-    return bridgeText(browserSessionCall("snapshot", ["tabId": tabId], args: args), describeSnapshot)
+    var params: [String: Any] = ["tabId": tabId]
+    // Preserve invalid values too: the extension validates the same contract on
+    // every platform instead of silently replacing a malformed request.
+    for key in ["offset", "limit"] {
+        if let value = args[key] { params[key] = value }
+    }
+    return bridgeText(browserSessionCall("snapshot", params, args: args), describeSnapshot)
 }
 
 /// browser_read: the page text, and where to continue if it was cut off.
@@ -3608,7 +3623,7 @@ let toolDefs: [[String: Any]] = [
     ],
     [
         "name": "browser_snapshot",
-        "description": "List the interactive elements (links, buttons, inputs) on the page in one of the agent's tabs, with the index each one has for browser_click, plus the page title and URL. Inputs show their type, such as input[password]. Works on a background tab, so the user can be looking at something else. Use it before every browser_click, because indices change when the page changes; use browser_read for the page's text. Read-only.",
+        "description": "List the interactive elements (links, buttons, inputs) on the page in one of the agent's tabs, with the index each one has for browser_click, plus the page title and URL. Inputs show their type, such as input[password]. Works on a background tab, so the user can be looking at something else. Use it before every browser_click, because indices change when the page changes; use browser_read for the page's text. Read-only. Automatically scopes to the topmost visible dialog when one is open, excluding hidden/inert controls but retaining reachable offscreen controls. Results report scope, total and truncation. Continue with offset and limit on the same tab/session; indices stay global across pages of an unchanged UI. Snapshot again after UI changes.",
         "inputSchema": [
             "type": "object",
             "properties": [
@@ -3621,6 +3636,18 @@ let toolDefs: [[String: Any]] = [
                 "tab_id": [
                     "type": "integer",
                     "description": "tab_id of one of the agent's tabs, from browser_open_tab or browser_list_tabs",
+                ],
+                "offset": [
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 2147483647,
+                    "description": "Control offset for pagination (default 0). Use the continuation offset from the previous result on an unchanged UI.",
+                ],
+                "limit": [
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 250,
+                    "description": "Maximum controls returned per page (default 250, maximum 250).",
                 ],
             ],
             "required": ["tab_id"],

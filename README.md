@@ -200,6 +200,18 @@ This is a guard rail for an agent that follows its instructions, not a sandbox. 
 
 Every action tool also takes `return_state`, which returns the state after the action in the same call.
 
+`browser_snapshot` automatically scopes to the topmost visible dialog when one is
+open, so covered background controls cannot consume the dialog's budget. Hidden
+and inert subtrees are excluded; reachable offscreen controls remain available.
+Native modeless dialogs and explicit `aria-modal="false"` do not scope the page.
+It returns up to `limit` controls (default and maximum `250`), reports `scope`,
+`offset`, `limit`, and `total`, and explicitly says when it is truncated and which
+`offset` to request next. Continue on the same `tab_id` and `session_id`. Indices
+are global within the selected scope and stay actionable across pages of an
+unchanged UI; after a UI change or navigation, take a fresh snapshot from
+`offset=0`. An action's `return_state` also starts at `offset=0` and uses the same
+scope and truncation reporting.
+
 Names, argument shapes and descriptions are identical on every platform, and CI enforces it (`node scripts/check-tool-parity.mjs`); a model that learned them on a Mac needs nothing new on Windows. To change a tool, edit both literals at once with `scripts/tool-defs.mjs` rather than by hand.
 
 ## Repository layout
@@ -228,6 +240,8 @@ Linux notes: element actions work everywhere; coordinate clicks need an X11 or X
 cd windows-linux && cargo test                  # Rust server
 node chrome-extension/background.test.mjs       # extension, against a fake Chrome
 node scripts/check-tool-parity.mjs              # Swift and Rust tool lists match
+# Snapshot DOM regressions (dependency-free CDP, isolated profile):
+node scripts/snapshot-dom.test.mjs --chrome <Chrome for Testing binary>
 # The browser tools end to end, in a throwaway Chrome for Testing profile that
 # never touches your own Chrome (npx playwright install chromium to get one):
 node scripts/e2e-browser.mjs --server <munim-computer-use binary> --chrome <Chrome for Testing binary>

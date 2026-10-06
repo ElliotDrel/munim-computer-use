@@ -640,12 +640,36 @@ test("a debugger session Chrome ended is attached again on the next command", as
   pageEval = () => ({ result: { value: {} } });
 });
 
+test("snapshot forwards bounded pagination and refuses malformed options before evaluation", async () => {
+  const expressions = [];
+  pageEval = (method, params) => {
+    if (params.expression?.includes("querySelectorAll(sel)")) expressions.push(params.expression);
+    return { result: { value: {} } };
+  };
+  await call("snapshot", { tabId: pageTab, offset: 250, limit: 20 });
+  assert.ok(expressions[0].endsWith('({"offset":250,"limit":20})'));
+  const count = expressions.length;
+  const malformed = [
+    { offset: -1 }, { offset: "250" }, { offset: 1.5 }, { offset: null },
+    { offset: 2147483648 }, { offset: Number.MAX_SAFE_INTEGER + 1 },
+    { limit: 0 }, { limit: 251 }, { limit: "10" }, { limit: null },
+  ];
+  for (const args of malformed) {
+    assert.match(await refuses("snapshot", { tabId: pageTab, ...args }), /offset must|limit must/);
+  }
+  assert.equal(expressions.length, count, "malformed pagination reached page script");
+  await call("snapshot", { tabId: pageTab });
+  assert.ok(expressions.at(-1).endsWith('({"offset":0,"limit":250})'));
+  pageEval = () => ({ result: { value: {} } });
+});
+
 test("a snapshot clears indices an earlier snapshot left on now-hidden elements", () => {
   const element = (tag, { hidden = false, idx } = {}) => {
     const attributes = new Map(idx === undefined ? [] : [["data-cu-idx", idx]]);
     return {
       tagName: tag.toUpperCase(),
       innerText: tag,
+      matches: () => false,
       hidden,
       getAttribute: (name) => attributes.get(name) ?? null,
       setAttribute: (name, value) => attributes.set(name, String(value)),
@@ -661,12 +685,13 @@ test("a snapshot clears indices an earlier snapshot left on now-hidden elements"
   const document = {
     title: "Step 2",
     querySelectorAll: (selector) =>
-      selector === "[data-cu-idx]" ? elements.filter((el) => el.hasAttribute("data-cu-idx")) : elements,
+      selector === "[data-cu-idx]" ? elements.filter((el) => el.hasAttribute("data-cu-idx")) : selector.startsWith("dialog") ? [] : elements,
   };
   const page = vm.createContext({
     document,
     location: { href: "https://shop.example/step2" },
     innerHeight: 800,
+    innerWidth: 1200,
     getComputedStyle: () => ({ visibility: "visible", display: "block" }),
   });
   const result = vm.runInContext(vm.runInContext("SNAPSHOT_JS", extensionContext), page);

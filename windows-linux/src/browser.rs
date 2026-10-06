@@ -641,8 +641,8 @@ fn call_timeout(command: &str, args: &Value, sites_ask: bool) -> Duration {
         // The extension's site approval prompt waits up to two minutes.
         timeout = timeout.max(Duration::from_secs(120) + PROMPT_GRACE);
     }
-    if args.get("return_state").and_then(Value::as_bool) == Some(true) {
-        timeout += Duration::from_secs(10);
+    if args.get("return_state").and_then(Value::as_bool) == Some(true) || args.get("wait_for_selector").is_some() {
+        timeout += Duration::from_secs(15);
     }
     timeout
 }
@@ -662,7 +662,13 @@ fn normalise(_command: &str, args: &Value) -> Value {
             map.insert(key.into(), value.clone());
         }
     }
-    for (from, to) in [("max_chars", "maxChars"), ("include_links", "includeLinks"), ("return_state", "returnState")] {
+    for (from, to) in [
+        ("max_chars", "maxChars"),
+        ("include_links", "includeLinks"),
+        ("return_state", "returnState"),
+        ("wait_for_selector", "waitForSelector"),
+        ("wait_timeout_ms", "waitTimeoutMs"),
+    ] {
         if let Some(value) = args.get(from) {
             map.insert(to.into(), value.clone());
         }
@@ -721,7 +727,7 @@ fn describe(command: &str, result: &Value, args: &Value) -> String {
                 .unwrap_or(-1);
             format!("released tab {tab} back to the user")
         }
-        "snapshot" => describe_snapshot(result),
+        "snapshot" => format!("{}{}", describe_readiness(result), describe_snapshot(result)),
         "read" => describe_read(result),
         "request_credentials" => describe_credentials(result, args),
         "close_all_tabs" => {
@@ -787,13 +793,31 @@ fn describe(command: &str, result: &Value, args: &Value) -> String {
             // return_state: the page as it stands after the action.
             match result.get("snapshot") {
                 Some(snapshot) => format!(
-                    "{line}\n\npage after the action (earlier indices are no longer valid):\n{}",
+                    "{line}\n\n{}page after the action (earlier indices are no longer valid):\n{}",
+                    describe_readiness(result),
                     describe_snapshot(snapshot)
                 ),
                 None => line,
             }
         }
     }
+}
+
+/// Readiness is separate from action success; never imply a retry is safe.
+fn describe_readiness(result: &Value) -> String {
+    let Some(readiness) = result.get("readiness") else { return String::new() };
+    let status = readiness.get("status").and_then(Value::as_str).unwrap_or("unknown");
+    let condition = readiness.get("condition").and_then(Value::as_str).unwrap_or("unknown");
+    let elapsed = readiness.get("elapsedMs").and_then(Value::as_u64).unwrap_or(0);
+    let mut line = format!("readiness: {status} ({condition}, {elapsed} ms)");
+    if let Some(selector) = readiness.get("selector").and_then(Value::as_str) {
+        line.push_str(&format!(" selector={selector}"));
+    }
+    if let Some(error) = readiness.get("error").and_then(Value::as_str) {
+        line.push_str(&format!(" — {error}"));
+    }
+    line.push_str("; only the stated condition was checked, not general app readiness. Re-observe with browser_snapshot before repeating a non-idempotent action.\n");
+    line
 }
 
 /// browser_read: the page text, and where to continue if it was cut off.
@@ -1076,6 +1100,37 @@ mod tests {
         assert_eq!(params["returnState"], json!(true));
         assert_eq!(params["query"], json!("price"));
         assert_eq!(params["timeoutMs"], json!(600_000), "the wait is capped");
+    }
+
+    #[test]
+    fn readiness_arguments_and_headroom_reach_every_stateful_browser_command() {
+        let args = json!({ "tab_id": 1, "return_state": true, "wait_for_selector": "[role=dialog] button", "wait_timeout_ms": 10000 });
+        for command in ["click", "type", "press", "navigate", "snapshot"] {
+            let params = normalise(command, &args);
+            assert_eq!(params["waitForSelector"], args["wait_for_selector"]);
+            assert_eq!(params["waitTimeoutMs"], json!(10000));
+            assert_eq!(call_timeout(command, &args, false), Duration::from_secs(35));
+        }
+        assert_eq!(call_timeout("snapshot", &json!({ "wait_for_selector": "#ready" }), false), Duration::from_secs(35));
+        // Invalid values are preserved for extension validation before acting.
+        assert_eq!(normalise("click", &json!({ "wait_timeout_ms": -1 }))["waitTimeoutMs"], json!(-1));
+    }
+
+    #[test]
+    fn readiness_status_survives_action_and_snapshot_text_rendering() {
+        for status in ["met", "timeout", "error", "not_requested"] {
+            let readiness = json!({ "status": status, "condition": "visible_selector", "selector": "#ready", "elapsedMs": 100, "error": "invalid CSS selector" });
+            let snapshot = json!({ "title": "Current", "url": "https://s.example", "elements": [] });
+            let action = describe("click", &json!({ "ok": true, "snapshot": snapshot, "readiness": readiness }), &json!({ "tab_id": 1 }));
+            assert!(action.starts_with("clicked in tab 1"), "{action}");
+            let observation = describe("snapshot", &json!({ "title": "Current", "elements": [], "readiness": readiness }), &json!({}));
+            for text in [action, observation] {
+                assert!(text.contains(&format!("readiness: {status} (visible_selector, 100 ms)")), "{text}");
+                assert!(text.contains("selector=#ready"), "{text}");
+                assert!(text.contains("invalid CSS selector"), "{text}");
+                assert!(text.contains("Re-observe with browser_snapshot"), "{text}");
+            }
+        }
     }
 
     #[test]

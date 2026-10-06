@@ -67,6 +67,18 @@ const article = [
   '<a href="/next">Next page</a>',
 ].join("\n");
 const pages = {
+  "/spa": `<title>Delayed dialog</title><button id="open">Open dialog</button><script>
+    window.clicks = 0;
+    document.getElementById('open').onclick = () => {
+      window.clicks++;
+      setTimeout(() => {
+        const modal = document.createElement('div');
+        modal.setAttribute('role', 'dialog');
+        modal.innerHTML = '<h1>Connect your Domain</h1><input aria-label="Domain"><button>Next</button>';
+        document.body.append(modal);
+      }, 1100);
+    };
+  </script>`,
   "/article": `<title>Article</title>${article}`,
   "/login": `<title>Sign in</title>
     <form onsubmit="event.preventDefault(); document.title = 'Signed in as ' + email.value;">
@@ -360,6 +372,34 @@ check("browser_click with return_state comes back with the next page", async () 
   assert.match(text, /page after the action/);
   assert.match(text, /Next {2}\[.*\/next\]/);
   assert.match(text, /button "Continue"/);
+});
+
+check("return_state waits for a delayed SPA dialog after exactly one click", async () => {
+  await ok("browser_navigate", { tab_id: tab, url: `${base}/spa`, return_state: true });
+  const snapshot = await ok("browser_snapshot", { tab_id: tab });
+  const index = Number(/\[(\d+)\] button "Open dialog"/.exec(snapshot)[1]);
+  const text = await ok("browser_click", {
+    tab_id: tab, index, return_state: true, wait_for_selector: "[role=dialog] button", wait_timeout_ms: 3000,
+  });
+  assert.match(text, /readiness: met \(visible_selector/);
+  assert.match(text, /button "Next"/);
+  const counts = await evaluateIn((url) => url === `${base}/spa`, "[window.clicks, document.querySelectorAll('[role=dialog]').length, location.href]");
+  assert.deepEqual(counts, [1, 1, `${base}/spa`]);
+});
+
+check("a timed-out SPA observation can be waited on without clicking again", async () => {
+  await ok("browser_navigate", { tab_id: tab, url: `${base}/spa`, return_state: true });
+  const snapshot = await ok("browser_snapshot", { tab_id: tab });
+  const index = Number(/\[(\d+)\] button "Open dialog"/.exec(snapshot)[1]);
+  const text = await ok("browser_click", {
+    tab_id: tab, index, return_state: true, wait_for_selector: "[role=dialog] button", wait_timeout_ms: 0,
+  });
+  assert.match(text, /clicked in tab/);
+  assert.match(text, /readiness: timeout/);
+  const observed = await ok("browser_snapshot", { tab_id: tab, wait_for_selector: "[role=dialog] button", wait_timeout_ms: 3000 });
+  assert.match(observed, /readiness: met/);
+  assert.match(observed, /button "Next"/);
+  assert.deepEqual(await evaluateIn((url) => url === `${base}/spa`, "[window.clicks, document.querySelectorAll('[role=dialog]').length]"), [1, 1]);
 });
 
 check("browser_navigate with return_state waits for the load", async () => {

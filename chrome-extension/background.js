@@ -1162,30 +1162,86 @@ async function unmarkTab(tabId) {
 
 const sleep = (ms) => new Promise((resume) => setTimeout(resume, ms));
 
-/**
- * Wait for the page to react to an action before snapshotting it for
- * `return_state`: a short pause for handlers to run, then — if the action
- * started a navigation — until the tab finishes loading (bounded).
- */
-async function settle(tabId, pauseMs = 350, loadBudgetMs = 8000) {
-  await sleep(pauseMs);
-  const deadline = Date.now() + loadBudgetMs;
-  while (Date.now() < deadline) {
-    const tab = await chrome.tabs.get(tabId).catch(() => null);
-    if (!tab || tab.status !== "loading") return;
-    await sleep(150);
+/** Validate the wait contract before an action can have side effects. */
+function validateReadiness(p, action = false) {
+  if (p.waitForSelector === undefined && p.waitTimeoutMs === undefined) return;
+  if (typeof p.waitForSelector !== "string" || !p.waitForSelector.trim() || p.waitForSelector.length > 2000) {
+    throw new Error("wait_for_selector must be a nonempty CSS selector (at most 2000 characters)");
+  }
+  if (action && p.returnState !== true) throw new Error("wait_for_selector requires return_state=true on actions");
+  if (p.waitTimeoutMs !== undefined && (!Number.isInteger(p.waitTimeoutMs) || p.waitTimeoutMs < 0 || p.waitTimeoutMs > 10000)) {
+    throw new Error("wait_timeout_ms must be an integer from 0 to 10000");
   }
 }
 
-/** Attach a fresh snapshot to an action's result when the caller asked for one. */
+/** A visible match in the top-level document, not arbitrary application readiness. */
+function visibleSelectorInPage(selector) {
+  let matches;
+  try {
+    matches = document.querySelectorAll(selector);
+  } catch {
+    return { error: "invalid CSS selector" };
+  }
+  return {
+    met: [...matches].some((el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return (
+        rect.width >= 2 && rect.height >= 2 && style.visibility !== "hidden" &&
+        style.visibility !== "collapse" && style.display !== "none"
+      );
+    }),
+  };
+}
+
+/** Poll an explicit condition, including delayed same-document rendering. */
+async function waitForReadiness(p) {
+  validateReadiness(p);
+  const start = Date.now();
+  const deadline = start + (p.waitTimeoutMs ?? 8000);
+  const outcome = (status, extra = {}) => ({
+    status, condition: "visible_selector", selector: p.waitForSelector,
+    elapsedMs: Date.now() - start, ...extra,
+  });
+  while (true) {
+    // Recheck on every observation: the action or a redirect may leave the
+    // allowed site during the wait. Never evaluate selectors on a blocked page.
+    await checkTab(requireClientId(p), p.tabId, p.sites, "read");
+    const tab = await chrome.tabs.get(p.tabId);
+    if (tab.status !== "loading") {
+      const res = await send(p.tabId, "Runtime.evaluate", {
+        expression: `(${visibleSelectorInPage.toString()})(${JSON.stringify(p.waitForSelector)})`,
+        returnByValue: true,
+      });
+      if (res?.exceptionDetails) return outcome("error", { error: res.exceptionDetails.text || "evaluate failed" });
+      const value = res?.result?.value;
+      if (value?.error) return outcome("error", { error: value.error });
+      if (value?.met === true) return outcome("met");
+    }
+    if (Date.now() >= deadline) return outcome("timeout");
+    await sleep(Math.min(100, deadline - Date.now()));
+  }
+}
+
+/** Navigation settling is only a heuristic; tab.complete says nothing about SPAs. */
+async function settle(tabId, pauseMs = 350, loadBudgetMs = 8000) {
+  const start = Date.now();
+  await sleep(pauseMs);
+  const deadline = Date.now() + loadBudgetMs;
+  while (true) {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.status !== "loading") return { status: "not_requested", condition: "document_load", elapsedMs: Date.now() - start };
+    if (Date.now() >= deadline) return { status: "timeout", condition: "document_load", elapsedMs: Date.now() - start };
+    await sleep(Math.min(150, deadline - Date.now()));
+  }
+}
+
+/** Attach current state and separate action success from readiness/timeout. */
 async function withState(p, result) {
   if (p.returnState !== true) return result;
-  await settle(p.tabId);
-  // The action may have left the page it was allowed on (a link, a redirect,
-  // a submitted form): apply the site rules to where the tab is now before
-  // reading it, as browser_snapshot does.
+  const readiness = p.waitForSelector !== undefined ? await waitForReadiness(p) : await settle(p.tabId);
   await checkTab(requireClientId(p), p.tabId, p.sites, "read");
-  return { ...result, snapshot: await snapshot(p.tabId) };
+  return { ...result, readiness, snapshot: await snapshot(p.tabId) };
 }
 
 /**
@@ -1594,16 +1650,21 @@ const handlers = {
     return { closed: p.tabId };
   },
   navigate: async (p) => {
+    validateReadiness(p, true);
     const clientId = requireClientId(p);
     assertOwned(clientId, p.tabId);
     await checkSite(clientId, p.url, p.sites, "open");
     return withState(p, await navigate(p.tabId, p.url));
   },
   snapshot: async (p) => {
+    validateReadiness(p);
     const clientId = requireClientId(p);
     assertOwned(clientId, p.tabId);
     await checkTab(clientId, p.tabId, p.sites, "read");
-    return snapshot(p.tabId, { offset: p.offset, limit: p.limit });
+    const readiness = p.waitForSelector !== undefined ? await waitForReadiness(p) : undefined;
+    await checkTab(clientId, p.tabId, p.sites, "read");
+    const state = await snapshot(p.tabId, { offset: p.offset, limit: p.limit });
+    return readiness ? { ...state, readiness } : state;
   },
   read: async (p) => {
     const clientId = requireClientId(p);
@@ -1612,6 +1673,7 @@ const handlers = {
     return readPage(p.tabId, { query: p.query, maxChars: p.maxChars, offset: p.offset, includeLinks: p.includeLinks });
   },
   click: async (p) => {
+    validateReadiness(p, true);
     const clientId = requireClientId(p);
     assertOwned(clientId, p.tabId);
     await checkTab(clientId, p.tabId, p.sites, "click in");
@@ -1619,12 +1681,14 @@ const handlers = {
     return withState(p, result);
   },
   type: async (p) => {
+    validateReadiness(p, true);
     const clientId = requireClientId(p);
     assertOwned(clientId, p.tabId);
     await checkTab(clientId, p.tabId, p.sites, "type in");
     return withState(p, await typeText(p.tabId, p.text));
   },
   press: async (p) => {
+    validateReadiness(p, true);
     const clientId = requireClientId(p);
     assertOwned(clientId, p.tabId);
     await checkTab(clientId, p.tabId, p.sites, "press keys in");

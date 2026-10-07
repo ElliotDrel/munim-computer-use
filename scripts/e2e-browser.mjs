@@ -48,7 +48,10 @@ const children = [];
 function cleanup() {
   for (const child of children) {
     try {
-      child.kill("SIGKILL");
+      // Each POSIX child owns an isolated process group, including Chromium's
+      // renderers and native hosts. Killing just its launcher leaves writers.
+      if (os.platform() === "win32") child.kill("SIGKILL");
+      else process.kill(-child.pid, "SIGKILL");
     } catch {}
   }
   // Chrome's children may still be exiting after SIGKILL; retry filesystem races.
@@ -132,6 +135,7 @@ const policyPath = path.join(root, "policy.json");
 // ── the MCP server ──────────────────────────────────────────────────────────
 
 const server = spawn(serverBinary, ["--profile", profilePath], {
+  detached: os.platform() !== "win32",
   env: { ...process.env, COMPUTER_USE_POLICY: policyPath },
   stdio: ["pipe", "pipe", "pipe"],
 });
@@ -196,7 +200,7 @@ const chromeArgs = [
   ...(os.platform() === "linux" ? ["--no-sandbox"] : []),
   "about:blank",
 ];
-const chrome = spawn(chromeBinary, chromeArgs, { stdio: ["ignore", "ignore", "pipe"] });
+const chrome = spawn(chromeBinary, chromeArgs, { detached: os.platform() !== "win32", stdio: ["ignore", "ignore", "pipe"] });
 children.push(chrome);
 let chromeLog = "";
 chrome.stderr.on("data", (chunk) => (chromeLog += chunk));

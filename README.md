@@ -212,9 +212,10 @@ the same wait **without performing an action**:
 ```
 
 The extension polls for any matching visible element in the top-level document,
-including same-document rendering after the tab reports `complete`. It uses the
-snapshot's geometric visibility rule (at least 2×2 CSS pixels and not CSS-hidden;
-not a guarantee of clickability, lack of occlusion, or opacity). Frames and shadow
+independently of resource loading, including same-document rendering. It shares
+the snapshot's visibility rules: at least 2×2 CSS pixels; no hidden, aria-hidden,
+inert or fully transparent ancestor. This is not a guarantee of clickability or
+lack of occlusion. Frames and shadow
 roots are not searched. Choose a selector specific to the **new expected UI**;
 an element already present can satisfy it immediately. No arbitrary page script
 is accepted.
@@ -251,14 +252,16 @@ native server; older extensions may omit readiness metadata.
 Regression checks: `node --test chrome-extension/background.test.mjs` covers the
 wait contract and site-policy guards. The real-browser CI harness
 `scripts/e2e-browser.mjs` tests a dialog delayed by 1100 ms without navigation,
-one click only, plus timeout and read-only recovery. The standalone Chromium
-regression can use an existing Playwright installation without adding a required
-dependency:
+one click only, plus timeout and read-only recovery. The dependency-free CDP
+regressions cover both snapshot scoping/pagination and SPA readiness. Run against
+an isolated Chrome/Chromium profile; no Playwright module is required:
 
 ```bash
-PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs node --test scripts/spa-readiness.test.mjs
-# Same assertions against the pre-fix source; expected to fail:
-SOURCE_REF=deb4c7a PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs node --test scripts/spa-readiness.test.mjs
+node scripts/snapshot-dom.test.mjs --chrome /path/to/chrome
+# Extract the pre-fix source; each suite must fail independently:
+git show deb4c7a:chrome-extension/background.js > original-background.js
+node scripts/snapshot-dom.test.mjs --chrome /path/to/chrome --source original-background.js --suite snapshot
+node scripts/snapshot-dom.test.mjs --chrome /path/to/chrome --source original-background.js --suite readiness
 ```
 
 `browser_snapshot` automatically scopes to the topmost visible dialog when one is
@@ -301,7 +304,7 @@ Linux notes: element actions work everywhere; coordinate clicks need an X11 or X
 cd windows-linux && cargo test                  # Rust server
 node chrome-extension/background.test.mjs       # extension, against a fake Chrome
 node scripts/check-tool-parity.mjs              # Swift and Rust tool lists match
-# Snapshot DOM regressions (dependency-free CDP, isolated profile):
+# Snapshot and SPA readiness regressions (dependency-free CDP, isolated profile):
 node scripts/snapshot-dom.test.mjs --chrome <Chrome for Testing binary>
 # The browser tools end to end, in a throwaway Chrome for Testing profile that
 # never touches your own Chrome (npx playwright install chromium to get one):

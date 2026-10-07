@@ -649,6 +649,26 @@ test("a readiness evaluation error is not reported as a failed click", async () 
   pageEval = () => ({ result: { value: {} } });
 });
 
+test("a readiness transport failure preserves the successful action and current snapshot", async () => {
+  let clicks = 0;
+  pageEval = (_method, params) => {
+    const expression = params.expression ?? "";
+    if (expression.includes("data-cu-idx=\"3\"")) {
+      clicks++;
+      return { result: { value: { ok: true, x: 5, y: 5 } } };
+    }
+    if (expression.includes("visibleSelectorInPage")) throw new Error("readiness transport unavailable");
+    return { result: { value: { title: "Current", elements: [] } } };
+  };
+  const result = await callAndWait("click", { tabId: pageTab, index: 3, returnState: true, waitForSelector: "#ready" });
+  assert.equal(result.ok, true);
+  assert.equal(result.readiness.status, "error");
+  assert.equal(result.readiness.error, "readiness transport unavailable");
+  assert.equal(result.snapshot.title, "Current");
+  assert.equal(clicks, 1);
+  pageEval = () => ({ result: { value: {} } });
+});
+
 test("an explicit wait rechecks site rules before each selector observation", async () => {
   const tab = tabs.get(pageTab);
   const before = tab.url;

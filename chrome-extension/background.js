@@ -553,6 +553,23 @@ async function send(tabId, method, params = {}) {
   return chrome.debugger.sendCommand({ tabId }, method, params);
 }
 
+/** Shared by snapshots and explicit readiness checks, serialized into the page. */
+function isElementVisibleInPage(el) {
+  const r = el.getBoundingClientRect();
+  if (r.width < 2 || r.height < 2) return false;
+  let escapedInert = false;
+  for (let node = el; node; node = node.parentElement) {
+    if (node.hidden || node.getAttribute("aria-hidden")?.toLowerCase() === "true") return false;
+    if (node.inert && !escapedInert) return false;
+    // Native showModal() escapes ancestor inertness, not its own inert subtrees.
+    if (node.matches("dialog:modal")) escapedInert = true;
+    const style = getComputedStyle(node);
+    if (style.display === "none" || style.contentVisibility === "hidden" || Number(style.opacity) === 0) return false;
+  }
+  const style = getComputedStyle(el);
+  return style.visibility !== "hidden" && style.visibility !== "collapse";
+}
+
 /// A compact outline of the interactive elements on the page, with ids the
 /// agent can click. Mirrors the accessibility-tree tools on the desktop side.
 const SNAPSHOT_JS = `((options = {}) => {
@@ -567,22 +584,7 @@ const SNAPSHOT_JS = `((options = {}) => {
   for (const old of document.querySelectorAll('[data-cu-idx]')) old.removeAttribute('data-cu-idx');
   // Accessibility-hidden/inert ancestors are not actionable. Do not use viewport
   // intersection here: indexed click scrolls reachable offscreen controls into view.
-  const visible = (el) => {
-    const r = el.getBoundingClientRect();
-    if (r.width < 2 || r.height < 2) return false;
-    let escapedInert = false;
-    for (let node = el; node; node = node.parentElement) {
-      if (node.hidden || node.getAttribute('aria-hidden')?.toLowerCase() === 'true') return false;
-      if (node.inert && !escapedInert) return false;
-      // showModal() escapes ancestor inertness, but an explicitly inert dialog
-      // or subtree within it remains inert.
-      if (node.matches('dialog:modal')) escapedInert = true;
-      const style = getComputedStyle(node);
-      if (style.display === 'none' || style.contentVisibility === 'hidden' || Number(style.opacity) === 0) return false;
-    }
-    const style = getComputedStyle(el);
-    return style.visibility !== 'hidden' && style.visibility !== 'collapse';
-  };
+  const visible = ${isElementVisibleInPage.toString()};
   // Native modal dialogs live in Chrome's top layer, above ordinary z-indexes.
   // For custom dialogs, use paint order at their visible centre, not DOM order
   // or raw z-index (which is only meaningful inside a stacking context).
@@ -1175,7 +1177,7 @@ function validateReadiness(p, action = false) {
 }
 
 /** A visible match in the top-level document, not arbitrary application readiness. */
-function visibleSelectorInPage(selector) {
+function visibleSelectorInPage(selector, visible) {
   let matches;
   try {
     matches = document.querySelectorAll(selector);
@@ -1183,14 +1185,7 @@ function visibleSelectorInPage(selector) {
     return { error: "invalid CSS selector" };
   }
   return {
-    met: [...matches].some((el) => {
-      const rect = el.getBoundingClientRect();
-      const style = getComputedStyle(el);
-      return (
-        rect.width >= 2 && rect.height >= 2 && style.visibility !== "hidden" &&
-        style.visibility !== "collapse" && style.display !== "none"
-      );
-    }),
+    met: [...matches].some(visible),
   };
 }
 
@@ -1207,17 +1202,21 @@ async function waitForReadiness(p) {
     // Recheck on every observation: the action or a redirect may leave the
     // allowed site during the wait. Never evaluate selectors on a blocked page.
     await checkTab(requireClientId(p), p.tabId, p.sites, "read");
-    const tab = await chrome.tabs.get(p.tabId);
-    if (tab.status !== "loading") {
-      const res = await send(p.tabId, "Runtime.evaluate", {
-        expression: `(${visibleSelectorInPage.toString()})(${JSON.stringify(p.waitForSelector)})`,
+    // An explicit DOM condition is independent of document/resource loading.
+    // In particular, a slow image must not hide an already-rendered dialog.
+    let res;
+    try {
+      res = await send(p.tabId, "Runtime.evaluate", {
+        expression: `(${visibleSelectorInPage.toString()})(${JSON.stringify(p.waitForSelector)}, ${isElementVisibleInPage.toString()})`,
         returnByValue: true,
       });
-      if (res?.exceptionDetails) return outcome("error", { error: res.exceptionDetails.text || "evaluate failed" });
-      const value = res?.result?.value;
-      if (value?.error) return outcome("error", { error: value.error });
-      if (value?.met === true) return outcome("met");
+    } catch (error) {
+      return outcome("error", { error: error.message || "evaluate failed" });
     }
+    if (res?.exceptionDetails) return outcome("error", { error: res.exceptionDetails.text || "evaluate failed" });
+    const value = res?.result?.value;
+    if (value?.error) return outcome("error", { error: value.error });
+    if (value?.met === true) return outcome("met");
     if (Date.now() >= deadline) return outcome("timeout");
     await sleep(Math.min(100, deadline - Date.now()));
   }

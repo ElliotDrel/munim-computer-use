@@ -43,7 +43,7 @@ const PREFILLED = "PREFILLED-VALUE-MUST-NOT-LEAK";
 const sleep = (ms) => new Promise((resume) => setTimeout(resume, ms));
 
 // Short base path: a Unix socket path must fit in 104 bytes on macOS.
-const root = fs.mkdtempSync(path.join(os.platform() === "win32" ? os.tmpdir() : "/tmp", "cu-e2e-"));
+const root = fs.mkdtempSync(path.join(os.platform() === "win32" ? (process.env.TMPDIR || os.tmpdir()) : "/tmp", "cu-e2e-"));
 const children = [];
 function cleanup() {
   for (const child of children) {
@@ -51,7 +51,8 @@ function cleanup() {
       child.kill("SIGKILL");
     } catch {}
   }
-  fs.rmSync(root, { recursive: true, force: true });
+  // Chrome's children may still be exiting after SIGKILL; retry filesystem races.
+  fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 process.on("exit", cleanup);
 

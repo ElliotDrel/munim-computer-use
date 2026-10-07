@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Isolated Windows native-host regression tests; Python standard library only.
 
-Usage: python scripts/test_munim_native_host_restart.py --binary PATH
+Usage: python scripts/test-native-host-restart.py --binary PATH
 No Chrome, MCP backend, registry, or live bridge is touched. Each scenario owns
 one random Win32 byte-mode pipe and only its own native-host child processes.
 The installed v0.6.0 must fail backend EOF and automatic restart lifecycle tests.

@@ -78,6 +78,7 @@ jobs:
         with:
           node-version: 22
       - run: node --test chrome-extension/background.test.mjs
+      - run: node scripts/snapshot-cleanup.test.mjs
       - run: node scripts/build-extension.test.mjs
       - run: node scripts/check-tool-parity.mjs
       - run: node scripts/tool-defs.mjs --check

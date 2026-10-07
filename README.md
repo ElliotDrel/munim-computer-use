@@ -214,7 +214,9 @@ the same wait **without performing an action**:
 The extension polls for any matching visible element in the top-level document,
 independently of resource loading, including same-document rendering. It shares
 the snapshot's visibility rules: at least 2×2 CSS pixels; no hidden, aria-hidden,
-inert or fully transparent ancestor. This is not a guarantee of clickability or
+inert or fully transparent ancestor. Self-transparent native form controls remain
+available for styled upload/checkbox hit targets; transparent containers do not.
+This is not a guarantee of clickability or
 lack of occlusion. Frames and shadow
 roots are not searched. Choose a selector specific to the **new expected UI**;
 an element already present can satisfy it immediately. No arbitrary page script
@@ -268,6 +270,11 @@ node scripts/snapshot-dom.test.mjs --chrome /path/to/chrome --source original-ba
 open, so covered background controls cannot consume the dialog's budget. Hidden
 and inert subtrees are excluded; reachable offscreen controls remain available.
 Native modeless dialogs and explicit `aria-modal="false"` do not scope the page.
+Native modal dialogs and explicit `aria-modal="true"` are definitive candidates.
+Implicit ARIA dialogs are heuristically scoped only when they cover the viewport
+centre and are topmost there, rather than merely at their own centre. With no
+hit-test stack, centre coverage is the fallback. Corner chat widgets and bottom
+cookie banners therefore retain the page's indexed controls.
 It returns up to `limit` controls (default and maximum `250`), reports `scope`,
 `offset`, `limit`, and `total`, and explicitly says when it is truncated and which
 `offset` to request next. Continue on the same `tab_id` and `session_id`. Indices

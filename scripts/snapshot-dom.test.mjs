@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import vm from "node:vm";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -16,10 +17,25 @@ const option = (name) => {
   return at >= 0 ? process.argv[at + 1] : undefined;
 };
 const suite = option("--suite") || "all";
-assert.ok(["all", "snapshot", "readiness"].includes(suite), "invalid --suite");
+assert.ok(["all", "snapshot", "readiness", "audit-r1", "audit-r2", "audit-r3"].includes(suite), "invalid --suite");
 const chromePath = option("--chrome");
 if (!chromePath) throw new Error("provide --chrome <Chrome for Testing binary>");
-const scratch = process.env.TMPDIR || path.join(root, ".snapshot-test");
+if (suite === "all" || suite === "audit-r3") {
+  // Exercise the actual profile-root declaration without creating a profile or
+  // writing into the checkout, even when testing the pre-fix runner.
+  const runner = fs.readFileSync(option("--runner-source") || fileURLToPath(import.meta.url), "utf8");
+  const declaration = runner.split(String.fromCharCode(10)).find((line) => line.startsWith("const scratch ="));
+  assert.ok(declaration, "missing scratch declaration");
+  for (const env of [{}, { TMPDIR: "designated-scratch" }]) {
+    const actual = vm.runInNewContext(declaration + "; scratch", {
+      process: { env }, path, root, os: { tmpdir: () => "system-temp-fixture" },
+    });
+    assert.equal(actual, env.TMPDIR || "system-temp-fixture", "profile fallback must be outside the checkout");
+  }
+  console.log("PASS scratch override and absent-TMPDIR fallback stay outside the checkout");
+  if (suite === "audit-r3") process.exit(0);
+}
+const scratch = process.env.TMPDIR || os.tmpdir();
 fs.mkdirSync(scratch, { recursive: true });
 const profile = fs.mkdtempSync(path.join(scratch, "snapshot-dom-"));
 const chrome = spawn(chromePath, [
@@ -96,7 +112,7 @@ try {
   const snapshot = (options = {}) => evaluate(expression.slice(0, -2) + `(${JSON.stringify(options)})`);
   const set = (html) => evaluate(`document.body.innerHTML = ${JSON.stringify(html)}; true`);
   const buttons = (count, prefix = "Background") => Array.from({ length: count }, (_, i) => `<button>${prefix} ${i}</button>`).join("");
-  if (suite !== "readiness") {
+  if (suite === "all" || suite === "snapshot") {
     await set(`<main aria-hidden="true">${buttons(260)}</main><div role="dialog" aria-modal="true" style="position:fixed;inset:0;background:white"><input aria-label="Domain"><button>Next</button><button>Verify</button></div>`);
     const modal = await snapshot();
     console.log(`original reproduction: ${modal.elements.length} controls; labels=${modal.elements.slice(0, 3).map((el) => el.label).join(", ")}`);
@@ -185,7 +201,44 @@ try {
 
   }
 
-  if (suite !== "snapshot") {
+  if (suite === "all" || suite === "audit-r1") {
+    await set('<nav><a href="#a">Home</a><a href="#b">Pricing</a><button>Sign in</button></nav><main><button id="buy">Buy now</button></main><div role="dialog" style="position:fixed;left:0;right:0;bottom:0;height:80px;background:white"><button>Accept cookies</button></div>');
+    const banner = await snapshot();
+    assert.equal(banner.scope, "page", "a modeless cookie banner must not suppress the page");
+    assert.deepEqual(banner.elements.map((el) => el.label), ["Home", "Pricing", "Sign in", "Buy now", "Accept cookies"]);
+    await evaluate('document.getElementById("buy").onclick = () => globalThis.pageActionClicked = true; true');
+    assert.equal((await evaluate(click(banner.elements.find((el) => el.label === "Buy now").i))).ok, true);
+    assert.equal(await evaluate("globalThis.pageActionClicked"), true);
+    await set('<main><button>Buy now</button><button>Checkout</button></main><div role="alertdialog" style="position:fixed;right:10px;bottom:10px;width:300px;height:200px;background:white"><textarea aria-label="Message"></textarea><button>Send</button></div>');
+    const chat = await snapshot();
+    assert.equal(chat.scope, "page", "a corner widget must not suppress the page");
+    assert.deepEqual(chat.elements.map((el) => el.label), ["Buy now", "Checkout", "Message", "Send"]);
+    // A missing background-tab hit-test stack must not promote this widget.
+    await evaluate('globalThis.savedHitTest = document.elementsFromPoint; document.elementsFromPoint = () => []; true');
+    assert.equal((await snapshot()).scope, "page");
+    await evaluate('document.elementsFromPoint = globalThis.savedHitTest; delete globalThis.savedHitTest; true');
+    console.log("PASS modeless cookie/chat widgets preserve indexed page actions, including absent hit tests");
+  }
+
+  if (suite === "all" || suite === "audit-r2") {
+    await set('<label style="display:inline-block;position:relative;padding:8px;border:1px solid">Upload resume<input id="upload" type="file" aria-label="Upload resume" style="position:absolute;inset:0;opacity:0"></label><label style="display:inline-block;position:relative;width:80px;height:30px">Toggle<input id="toggle" type="checkbox" aria-label="Enable notifications" style="position:absolute;inset:0;opacity:0;width:80px;height:30px"></label>');
+    const controls = await snapshot();
+    assert.deepEqual(controls.elements.map((el) => el.label), ["Upload resume", "Enable notifications"], "transparent native hit targets must remain indexed");
+    const toggle = controls.elements.find((el) => el.tag === "input[checkbox]");
+    assert.equal((await evaluate(click(toggle.i))).ok, true);
+    assert.equal(await evaluate('document.getElementById("toggle").checked'), true);
+    const visible = vm.runInNewContext(declaration + "; isElementVisibleInPage");
+    const selectorCode = source.slice(source.indexOf("function visibleSelectorInPage("), source.indexOf("/** Poll an explicit condition"));
+    const selector = vm.runInNewContext(selectorCode + "; visibleSelectorInPage");
+    const ready = (target) => evaluate(`(${selector.toString()})(${JSON.stringify(target)}, ${visible.toString()})`);
+    assert.equal((await ready("#toggle")).met, true);
+    await set('<button>Page action</button><div id="transparent-dialog" role="dialog" aria-modal="true" style="position:fixed;inset:0;opacity:0"><button>Hidden modal control</button></div>');
+    assert.equal((await snapshot()).scope, "page", "a fully transparent dialog is not a visible modal");
+    assert.equal((await ready("#transparent-dialog")).met, false, "a transparent container must not satisfy visible readiness");
+    console.log("PASS transparent native inputs stay indexed/clickable/ready while transparent containers stay hidden");
+  }
+
+  if (suite === "all" || suite === "readiness") {
     const between = (first, last) => {
       const begin = source.indexOf(first);
       const end = source.indexOf(last, begin);

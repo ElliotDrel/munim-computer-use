@@ -557,6 +557,9 @@ async function send(tabId, method, params = {}) {
 function isElementVisibleInPage(el) {
   const r = el.getBoundingClientRect();
   if (r.width < 2 || r.height < 2) return false;
+  // Styled labels often use transparent native controls as real hit targets.
+  // Do not extend this exception to containers: a faded-out dialog is not ready.
+  const transparentControl = el.matches('input,button,select,textarea');
   let escapedInert = false;
   for (let node = el; node; node = node.parentElement) {
     if (node.hidden || node.getAttribute("aria-hidden")?.toLowerCase() === "true") return false;
@@ -564,7 +567,8 @@ function isElementVisibleInPage(el) {
     // Native showModal() escapes ancestor inertness, not its own inert subtrees.
     if (node.matches("dialog:modal")) escapedInert = true;
     const style = getComputedStyle(node);
-    if (style.display === "none" || style.contentVisibility === "hidden" || Number(style.opacity) === 0) return false;
+    if (style.display === "none" || style.contentVisibility === "hidden" ||
+        (Number(style.opacity) === 0 && (node !== el || !transparentControl))) return false;
   }
   const style = getComputedStyle(el);
   return style.visibility !== "hidden" && style.visibility !== "collapse";
@@ -589,7 +593,17 @@ const SNAPSHOT_JS = `((options = {}) => {
   // For custom dialogs, use paint order at their visible centre, not DOM order
   // or raw z-index (which is only meaningful inside a stacking context).
   // Modeless native dialogs and explicit aria-modal=false keep page controls.
-  const dialogs = Array.from(document.querySelectorAll('dialog:modal,[role=dialog]:not([aria-modal=false i]),[role=alertdialog]:not([aria-modal=false i]),[aria-modal=true i]')).filter(visible);
+  const dialogs = Array.from(document.querySelectorAll('dialog:modal,[role=dialog]:not([aria-modal=false i]),[role=alertdialog]:not([aria-modal=false i]),[aria-modal=true i]')).filter((dialog) => {
+    if (!visible(dialog)) return false;
+    if (dialog.matches('dialog:modal,[aria-modal=true i]')) return true;
+    // An implicit ARIA dialog is not automatically modal. Preserve full-page
+    // overlays, but never let a corner widget or bottom banner hide the page.
+    const x = innerWidth / 2, y = innerHeight / 2;
+    const r = dialog.getBoundingClientRect();
+    if (x < r.left || x >= r.right || y < r.top || y >= r.bottom) return false;
+    const painted = document.elementsFromPoint(x, y);
+    return !painted.length || dialog.contains(painted[0]);
+  });
   const native = dialogs.filter((dialog) => dialog.matches(':modal'));
   // Keep nested custom dialogs inside the native top layer eligible too.
   const candidates = dialogs.filter((dialog) => !native.length || native.some((layer) => layer.contains(dialog))).reverse();

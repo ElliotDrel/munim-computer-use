@@ -45,7 +45,7 @@ const chrome = spawn(chromePath, [
   "--no-first-run",
   ...(process.platform === "linux" ? ["--no-sandbox"] : []),
   "about:blank",
-], { stdio: ["ignore", "ignore", "pipe"] });
+], { detached: process.platform !== "win32", stdio: ["ignore", "ignore", "pipe"] });
 let chromeLog = "";
 chrome.stderr.on("data", (chunk) => (chromeLog += chunk));
 chrome.on("error", (error) => (chromeLog += error.message));
@@ -332,11 +332,19 @@ try {
   }
 } finally {
   socket?.close();
-  if (chrome.pid && chrome.exitCode === null && chrome.signalCode === null) {
-    const exited = new Promise((resolve) => chrome.once("exit", resolve));
-    chrome.kill();
-    await exited;
+  const exited = chrome.pid && chrome.exitCode === null && chrome.signalCode === null
+    ? new Promise((resolve) => chrome.once("exit", resolve)) : null;
+  if (chrome.pid) {
+    try {
+      // POSIX Chromium children can outlive their launcher and keep writing.
+      // Signal only this test's private process group, even after launcher exit.
+      if (process.platform === "win32") chrome.kill();
+      else process.kill(-chrome.pid, "SIGKILL");
+    } catch (error) {
+      if (error.code !== "ESRCH") throw error;
+    }
   }
-  // Windows child processes can release profile files a moment after exit.
+  if (exited) await exited;
+  // Children can release profile files a moment after the group is terminated.
   fs.rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 }

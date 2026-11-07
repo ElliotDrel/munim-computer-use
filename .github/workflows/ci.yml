@@ -46,7 +46,7 @@ jobs:
         if: runner.os == 'Windows'
         uses: actions/setup-python@v6
         with:
-          python-version: '3.15.2'
+          python-version: '3.11'
       - name: Windows native-host backend EOF and restart
         if: runner.os == 'Windows'
         working-directory: .
